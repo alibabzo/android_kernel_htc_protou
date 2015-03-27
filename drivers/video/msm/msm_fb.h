@@ -76,7 +76,8 @@ struct msm_fb_data_type {
 
 	panel_id_type panel;
 	struct msm_panel_info panel_info;
-
+	int first_init_lcd;
+	
 	DISP_TARGET dest;
 	struct fb_info *fbi;
 
@@ -157,6 +158,11 @@ struct msm_fb_data_type {
 	__u32 var_yres;
 	__u32 var_pixclock;
 	__u32 var_frame_rate;
+
+#if 1
+	uint32_t width;
+	uint32_t height;
+#endif
 
 #ifdef MSM_FB_ENABLE_DBGFS
 	struct dentry *sub_dir;
@@ -249,9 +255,12 @@ void fill_black_screen(bool on, uint8 pipe_num, uint8 mixer_num);
 int msm_fb_check_frame_rate(struct msm_fb_data_type *mfd,
 				struct fb_info *info);
 
+extern void htc_mdp_sem_down(struct task_struct *current_task, struct semaphore *mutex);
+extern void htc_mdp_sem_up(struct semaphore *mutex);
 #ifdef CONFIG_FB_MSM_LOGO
 #define INIT_IMAGE_FILE "/initlogo.rle"
 int load_565rle_image(char *filename, bool bf_supported);
 #endif
 
+#define DEFAULT_BRIGHTNESS 143
 #endif /* MSM_FB_H */

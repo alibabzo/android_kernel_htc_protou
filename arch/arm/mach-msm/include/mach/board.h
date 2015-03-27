@@ -415,6 +415,8 @@ struct msm_panel_common_pdata {
 	u32 splash_screen_addr;
 	u32 splash_screen_size;
 	char mdp_iommu_split_domain;
+	int (*mdp_color_enhance)(void);
+	int (*mdp_gamma)(void);
         u32 avtimer_phy;
 };
 
@@ -451,6 +453,7 @@ struct mipi_dsi_platform_data {
 	int (*get_lane_config)(void);
 	char (*splash_is_enabled)(void);
 	int target_type;
+	char dlane_swap;
 };
 
 enum mipi_dsi_3d_ctrl {
@@ -491,6 +494,8 @@ struct msm_fb_platform_data {
 	int mddi_prescan;
 	unsigned char ext_resolution;
 	int (*allow_set_offset)(void);
+	uint32_t width;
+	uint32_t height;
 	char prim_panel_name[PANEL_NAME_MAX_LEN];
 	char ext_panel_name[PANEL_NAME_MAX_LEN];
 };

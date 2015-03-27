@@ -49,9 +49,9 @@ static char ptype[60] = "Panel Type = ";
 #define DEFAULT_BRIGHTNESS 143
 static unsigned int last_brightness = DEFAULT_BRIGHTNESS;
 
-void mdp_color_enhancement(const struct mdp_reg *reg_seq, int size);
+void mdp_color_enhancement(struct mdp_reg *reg_seq, int size);
 
-static struct mdp_reg protou_color_v105[] = {
+struct mdp_reg protou_color_enhancement[] = {
 	{0x93400, 0x0211, 0x0},
 	{0x93404, 0xFFF2, 0x0},
 	{0x93408, 0xFFFF, 0x0},
@@ -75,14 +75,14 @@ static struct mdp_reg protou_color_v105[] = {
 	{0x93694, 0x00FF, 0x0},
 };
 
-static int protou_mdp_color_enhance(void)
+int protou_mdp_color_enhancement(void)
 {
-	mdp_color_enhancement(protou_color_v105, ARRAY_SIZE(protou_color_v105));
+//	mdp_color_enhancement(protou_color_enhancement, ARRAY_SIZE(protou_color_enhancement));
 
 	return 0;
 }
 
-static struct mdp_reg protou_gamma[] = {
+struct mdp_reg protou_gamma[] = {
 	{0x93800, 0x000000, 0x0},
 	{0x93804, 0x010000, 0x0},
 	{0x93808, 0x020101, 0x0},
@@ -342,9 +342,9 @@ static struct mdp_reg protou_gamma[] = {
 	{0x90070, 0x1F, 0x0}
 };
 
-static int protou_mdp_gamma(void)
+int protou_mdp_gamma(void)
 {
-	mdp_color_enhancement(protou_gamma, ARRAY_SIZE(protou_gamma));
+//	mdp_color_enhancement(protou_gamma, ARRAY_SIZE(protou_gamma));
 
 	return 0;
 }
@@ -677,7 +677,6 @@ static struct mipi_dsi_platform_data mipi_dsi_pdata = {
 	.vsync_gpio = 97,
 	.dsi_power_save = mipi_panel_power,
 	.get_lane_config = msm_fb_get_lane_config,
-	.dlane_swap = 0x01,
 };
 
 #define BRI_SETTING_MIN                 30
@@ -1175,8 +1174,6 @@ static struct msm_panel_common_pdata mdp_pdata = {
 	.cont_splash_enabled = 0x00,
 	.gpio = 97,
 	.mdp_rev = MDP_REV_303,
-	.mdp_color_enhance = protou_mdp_color_enhance,
-	.mdp_gamma = protou_mdp_gamma,
 };
 
 int __init protou_init_panel(void)
