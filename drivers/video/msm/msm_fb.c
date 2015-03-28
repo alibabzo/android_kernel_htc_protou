@@ -128,6 +128,34 @@ static void msm_fb_scale_bl(__u32 *bl_lvl);
 static void msm_fb_commit_wq_handler(struct work_struct *work);
 static int msm_fb_pan_idle(struct msm_fb_data_type *mfd);
 
+#define NUM_ALLOC 3
+#define ION_CLIENT_FB_PJT "msmfb_projector"
+static struct ion_client *usb_pjt_client = NULL;
+static struct ion_handle *usb_pjt_handle[NUM_ALLOC] = { NULL };
+static void *virt_addr[NUM_ALLOC] = {0};
+static int mem_fd[NUM_ALLOC] = {0};
+static struct msmfb_usb_projector_info usb_pjt_info = {0, 0};
+static int mem_mapped = 0;
+
+char *get_fb_addr(void)
+{
+	int i;
+
+	if (!usb_pjt_info.latest_offset) {
+		printk(KERN_WARNING "%s: wrong address sent via ioctl?\n", __func__);
+		return 0;
+	}
+
+	usb_pjt_info.usb_offset = usb_pjt_info.latest_offset;
+
+	for (i=0; i<NUM_ALLOC; i++)
+		if (mem_fd[i] == usb_pjt_info.usb_offset)
+			return (char *)virt_addr[i];
+
+	printk(KERN_ERR "%s: <FATAL> Impossible to be here.\n", __func__);
+	return 0;
+}
+
 #ifdef MSM_FB_ENABLE_DBGFS
 
 #define MSM_FB_MAX_DBGFS 1024
@@ -359,7 +387,38 @@ static void msm_fb_remove_sysfs(struct platform_device *pdev)
 	sysfs_remove_group(&mfd->fbi->dev->kobj, &msm_fb_attr_group);
 }
 
+void htc_mdp_sem_down(struct task_struct *current_task, struct semaphore *mutex)
+{
+	int ret = 0;
+	do {
+		ret = down_timeout(mutex, msecs_to_jiffies(5000));
+		if (ret != 0) {
+			if (htc_mdp_owner_task) {
+				printk(KERN_ERR "===== htc_mdp_owner_task: %s =====\n", htc_mdp_owner_task->comm);
+				
+				show_stack(htc_mdp_owner_task, htc_mdp_owner_task->stack);
+			}
+
+			printk(KERN_ERR "===== current_task: %s, ret=%d =====\n", current_task->comm, ret);
+			show_stack(current_task, current_task->stack);
+		}
+	} while (ret != 0);
+
+	
+	htc_mdp_owner_task = current_task;
+}
+
+void htc_mdp_sem_up(struct semaphore *mutex)
+{
+	
+	htc_mdp_owner_task = NULL;
+
+	up(mutex);
+}
+
 static void bl_workqueue_handler(struct work_struct *work);
+
+
 
 static int msm_fb_probe(struct platform_device *pdev)
 {
@@ -772,6 +831,70 @@ static void msmfb_early_resume(struct early_suspend *h)
 	struct msm_fb_data_type *mfd = container_of(h, struct msm_fb_data_type,
 						    early_suspend);
 	msm_fb_resume_sub(mfd);
+}
+#endif
+
+#ifdef CONFIG_HTC_ONMODE_CHARGING
+static void msmfb_onchg_suspend(struct early_suspend *h)
+{
+	struct msm_fb_data_type *mfd = container_of(h, struct msm_fb_data_type,
+						    onchg_suspend);
+#ifdef CONFIG_FB_MSM_OVERLAY
+	struct fb_info *fbi = mfd->fbi;
+	printk("[DISP] %s\n", __func__);
+	switch (mfd->fbi->var.bits_per_pixel) {
+	case 32:
+		memset32_io((void *)fbi->screen_base, 0xFF000000,
+				fbi->fix.smem_len);
+		break;
+	default:
+		memset_io(fbi->screen_base, 0x00, fbi->fix.smem_len);
+		break;
+	}
+#endif
+	mutex_lock(&suspend_mutex);
+	MSM_FB_INFO("%s starts.\n", __func__);
+	msm_fb_suspend_sub(mfd);
+	MSM_FB_INFO("%s is done.\n", __func__);
+
+	in_onchg_resume = FALSE;
+	mutex_unlock(&suspend_mutex);
+}
+
+static void msmfb_onchg_resume(struct early_suspend *h)
+{
+	struct msm_fb_data_type *mfd = container_of(h, struct msm_fb_data_type,
+						    onchg_suspend);
+	printk("[DISP] %s\n", __func__);
+
+	mutex_lock(&suspend_mutex);
+	MSM_FB_INFO("%s starts.\n", __func__);
+	msm_fb_resume_sub(mfd);
+	MSM_FB_INFO("%s is done.\n", __func__);
+
+	in_onchg_resume = TRUE;
+	mutex_unlock(&suspend_mutex);
+}
+#endif 
+
+#ifdef PROTOU_ESD_WORKAROUND
+void htc_protou_esd_wq_routine(struct work_struct *work) {
+	int esd_test = 0;
+
+	if (board_mfg_mode() != 4) {
+		htc_mdp_sem_down(current, &htc_protou_mfd->dma->mutex);
+		esd_test = mipi_dsi_cmd_bta_sw_trigger_special();
+		htc_mdp_sem_up(&htc_protou_mfd->dma->mutex);
+		if (esd_test == 0) {
+			printk(KERN_ERR "[DISP] DriverIC didn't response!! Recover!!\n");
+			mutex_lock(&suspend_mutex);
+			msm_fb_suspend_sub(htc_protou_mfd);
+			mdelay(100);
+			msm_fb_resume_sub(htc_protou_mfd);
+			mutex_unlock(&suspend_mutex);
+		}
+		queue_delayed_work(htc_protou_esd_wq, &htc_protou_esd_dw, msecs_to_jiffies(5000));
+	}
 }
 #endif
 
@@ -1773,6 +1896,16 @@ static void bl_workqueue_handler(struct work_struct *work)
 		bl_updated = 1;
 		up(&mfd->sem);
 	}
+}
+
+void msm_fb_release_timeline(struct msm_fb_data_type *mfd)
+{
+	mutex_lock(&mfd->sync_mutex);
+	if (mfd->timeline) {
+		sw_sync_timeline_inc(mfd->timeline, 2);
+		mfd->timeline_value += 2;
+	}
+	mutex_unlock(&mfd->sync_mutex);
 }
 
 DEFINE_SEMAPHORE(msm_fb_pan_sem);
@@ -3708,6 +3841,7 @@ static int msm_fb_ioctl(struct fb_info *info, unsigned int cmd,
 	struct mdp_buf_sync buf_sync;
 	int ret = 0;
 	msm_fb_pan_idle(mfd);
+	struct msmfb_usb_projector_info tmp_info;
 
 	switch (cmd) {
 #ifdef CONFIG_FB_MSM_OVERLAY

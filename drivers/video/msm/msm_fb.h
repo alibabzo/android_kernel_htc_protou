@@ -244,14 +244,17 @@ int msm_fb_detect_client(const char *name);
 int calc_fb_offset(struct msm_fb_data_type *mfd, struct fb_info *fbi, int bpp);
 void msm_fb_wait_for_fence(struct msm_fb_data_type *mfd);
 int msm_fb_signal_timeline(struct msm_fb_data_type *mfd);
+void msm_fb_release_timeline(struct msm_fb_data_type *mfd);
 #ifdef CONFIG_FB_BACKLIGHT
 void msm_fb_config_backlight(struct msm_fb_data_type *mfd);
 #endif
 
+void unfill_black_screen(void);
 void fill_black_screen(bool on, uint8 pipe_num, uint8 mixer_num);
 int msm_fb_check_frame_rate(struct msm_fb_data_type *mfd,
 				struct fb_info *info);
-
+extern void htc_mdp_sem_down(struct task_struct *current_task, struct semaphore *mutex);
+extern void htc_mdp_sem_up(struct semaphore *mutex);
 #ifdef CONFIG_FB_MSM_LOGO
 #define INIT_IMAGE_FILE "/initlogo.rle"
 int load_565rle_image(char *filename, bool bf_supported);

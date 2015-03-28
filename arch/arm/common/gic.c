@@ -1124,6 +1124,42 @@ void msm_gic_restore(void)
 	gic_cpu_restore(0);
 }
 
+void core1_gic_configure_and_raise(void)
+{
+	struct gic_chip_data *gic = &gic_data[0];
+	void __iomem *base = gic_data_dist_base(gic);
+	unsigned int value = 0;
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&irq_controller_lock, flags);
+
+	value = __raw_readl(base + GIC_DIST_ACTIVE_BIT + 0x4);
+	value |= BIT(8);
+	__raw_writel(value, base + GIC_DIST_ACTIVE_BIT + 0x4);
+	mb();
+
+	value = __raw_readl(base + GIC_DIST_TARGET + 0x24);
+	value |= BIT(13);
+	__raw_writel(value, base + GIC_DIST_TARGET + 0x24);
+	mb();
+
+	value = __raw_readl(base + GIC_DIST_TARGET + 0x28);
+	value |= BIT(1);
+	__raw_writel(value, base + GIC_DIST_TARGET + 0x28);
+	mb();
+
+	value =  __raw_readl(base + GIC_DIST_ENABLE_SET + 0x4);
+	value |= BIT(8);
+	__raw_writel(value, base + GIC_DIST_ENABLE_SET + 0x4);
+	mb();
+
+	value =  __raw_readl(base + GIC_DIST_PENDING_SET + 0x4);
+	value |= BIT(8);
+	__raw_writel(value, base + GIC_DIST_PENDING_SET + 0x4);
+	mb();
+	raw_spin_unlock_irqrestore(&irq_controller_lock, flags);
+}
+
 void read_active_irq(void)
 {
        unsigned int ret;

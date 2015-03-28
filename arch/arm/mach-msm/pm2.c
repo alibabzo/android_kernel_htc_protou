@@ -3,7 +3,7 @@
  * MSM Power Management Routines
  *
  * Copyright (C) 2007 Google, Inc.
- * Copyright (c) 2008-2012 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2008-2012 Code Aurora Forum. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -23,14 +23,11 @@
 #include <linux/init.h>
 #include <linux/pm_qos.h>
 #include <linux/suspend.h>
-#include <linux/reboot.h>
 #include <linux/io.h>
 #include <linux/tick.h>
 #include <linux/memory.h>
 #include <mach/msm_iomap.h>
 #include <mach/system.h>
-#include <mach/board.h>
-#include <asm/system.h>
 #ifdef CONFIG_CPU_V7
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
@@ -41,7 +38,6 @@
 #ifdef CONFIG_VFP
 #include <asm/vfp.h>
 #endif
-#include <mach/htc_util.h>
 
 #ifdef CONFIG_MSM_MEMORY_LOW_POWER_MODE_SUSPEND_DEEP_POWER_DOWN
 #include <mach/msm_migrate_pages.h>
@@ -49,7 +45,7 @@
 #include <mach/socinfo.h>
 #include <mach/proc_comm.h>
 #include <asm/smp_scu.h>
-#include <linux/console.h>
+
 #include "smd_private.h"
 #include "smd_rpcrouter.h"
 #include "acpuclock.h"
@@ -64,6 +60,9 @@
 #include "pm-boot.h"
 #include "devices-msm7x2xa.h"
 
+/******************************************************************************
+ * Debug Definitions
+ *****************************************************************************/
 
 enum {
 	MSM_PM_DEBUG_SUSPEND = BIT(0),
@@ -73,19 +72,11 @@ enum {
 	MSM_PM_DEBUG_RESET_VECTOR = BIT(4),
 	MSM_PM_DEBUG_SMSM_STATE = BIT(5),
 	MSM_PM_DEBUG_IDLE = BIT(6),
-	MSM_PM_DEBUG_WAKEUP_REASON = BIT(8),
 	MSM_PM_DEBUG_HOTPLUG = BIT(7),
-	MSM_PM_DEBUG_IDLE_CLOCK = BIT(11),
 };
 
-#define RESTART_REASON_OEM_BASE		0x6f656d00
-#define RESTART_REASON_RIL_FATAL	(RESTART_REASON_OEM_BASE | 0x99)
-extern void wait_rmt_final_call_back(int timeout);
-
-DEFINE_PER_CPU(int, power_collapsed);
-
 static int msm_pm_debug_mask;
-static int msm_pm_debug_mask = MSM_PM_DEBUG_CLOCK | MSM_PM_DEBUG_WAKEUP_REASON | MSM_PM_DEBUG_HOTPLUG;
+int power_collapsed;
 module_param_named(
 	debug_mask, msm_pm_debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP
 );
@@ -111,7 +102,7 @@ module_param_named(
 			smsm_get_state(SMSM_APPS_DEM)); \
 	} while (0)
 
-#define MSM_PM_DEBUG_PRINT_SLEEP_INFO(from_idle) \
+#define MSM_PM_DEBUG_PRINT_SLEEP_INFO() \
 	do { \
 		if (msm_pm_debug_mask & MSM_PM_DEBUG_SMSM_STATE) \
 			smsm_print_sleep_info(msm_pm_smem_data->sleep_time, \
@@ -119,22 +110,12 @@ module_param_named(
 				msm_pm_smem_data->irq_mask, \
 				msm_pm_smem_data->wakeup_reason, \
 				msm_pm_smem_data->pending_irqs); \
-		if (msm_pm_debug_mask & MSM_PM_DEBUG_WAKEUP_REASON && !from_idle) \
-			printk(KERN_INFO "SMEM_APPS_DEM_SLAVE_DATA: " \
-				"%ds %x %x %x %x %x %x %x %s %x\n", \
-				msm_pm_smem_data->sleep_time, \
-				msm_pm_smem_data->irq_mask, \
-				msm_pm_smem_data->resources_used, \
-				msm_pm_smem_data->reserved1, \
-				msm_pm_smem_data->wakeup_reason, \
-				msm_pm_smem_data->pending_irqs, \
-				msm_pm_smem_data->rpc_prog, \
-				msm_pm_smem_data->rpc_proc, \
-				msm_pm_smem_data->smd_port_name, \
-				msm_pm_smem_data->reserved2); \
 	} while (0)
 
 
+/******************************************************************************
+ * Sleep Modes and Parameters
+ *****************************************************************************/
 
 static int msm_pm_idle_sleep_min_time = CONFIG_MSM7X00A_IDLE_SLEEP_MIN_TIME;
 module_param_named(
@@ -188,15 +169,9 @@ struct msm_pm_sysfs_sleep_mode {
 	struct msm_pm_kobj_attribute kas[MSM_PM_MODE_ATTR_NR];
 };
 
-#define BOOT_LOCK_TIMEOUT_NORMAL	(60 * HZ)
-#define BOOT_LOCK_TIMEOUT_SHORT 	(10 * HZ)
-static void do_expire_boot_lock(struct work_struct *work)
-{
-	enable_hlt();
-	pr_info("Release 'boot-time' no_halt_lock\n");
-}
-static DECLARE_DELAYED_WORK(work_expire_boot_lock, do_expire_boot_lock);
-
+/*
+ * Write out the attribute.
+ */
 static ssize_t msm_pm_mode_attr_show(
 	struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
@@ -250,6 +225,9 @@ static ssize_t msm_pm_mode_attr_show(
 	return ret;
 }
 
+/*
+ * Read in the new attribute value.
+ */
 static ssize_t msm_pm_mode_attr_store(struct kobject *kobj,
 	struct kobj_attribute *attr, const char *buf, size_t count)
 {
@@ -294,7 +272,7 @@ static ssize_t msm_pm_mode_attr_store(struct kobject *kobj,
 	return ret ? ret : count;
 }
 
- 
+ /* Add sysfs entries for one cpu. */
 static int __init msm_pm_mode_sysfs_add_cpu(
 	unsigned int cpu, struct kobject *modes_kobj)
 {
@@ -374,6 +352,9 @@ mode_sysfs_add_cpu_exit:
 	return ret;
 }
 
+/*
+ * Add sysfs entries for the sleep modes.
+ */
 static int __init msm_pm_mode_sysfs_add(void)
 {
 	struct kobject *module_kobj = NULL;
@@ -423,7 +404,7 @@ void __init msm_pm_set_platform_data(
 
 void __init msm_pm_set_irq_extns(struct msm_pm_irq_calls *irq_calls)
 {
-	
+	/* sanity check */
 	BUG_ON(irq_calls == NULL || irq_calls->irq_pending == NULL ||
 		irq_calls->idle_sleep_allowed == NULL ||
 		irq_calls->enter_sleep1 == NULL ||
@@ -440,6 +421,9 @@ void __init msm_pm_set_cpr_ops(struct msm_pm_cpr_ops *ops)
 	msm_cpr_ops = ops;
 }
 
+/******************************************************************************
+ * Sleep Limitations
+ *****************************************************************************/
 enum {
 	SLEEP_LIMIT_NONE = 0,
 	SLEEP_LIMIT_NO_TCXO_SHUTDOWN = 2,
@@ -455,6 +439,9 @@ enum {
 #endif
 
 
+/******************************************************************************
+ * Configure Hardware for Power Down/Up
+ *****************************************************************************/
 
 #if defined(CONFIG_ARCH_MSM7X30)
 #define APPS_CLK_SLEEP_EN (MSM_APCS_GCC_BASE + 0x020)
@@ -468,6 +455,9 @@ enum {
 #define APPS_SECOP	  NULL
 #endif
 
+/*
+ * Configure hardware registers in preparation for Apps power down.
+ */
 static void msm_pm_config_hw_before_power_down(void)
 {
 	if (cpu_is_msm7x30() || cpu_is_msm8x55()) {
@@ -488,58 +478,75 @@ static void msm_pm_config_hw_before_power_down(void)
 	mb();
 }
 
-static void msm_pm_configure_top_csr(void)
+/*
+ * Program the top csr from core0 context to put the
+ * core1 into GDFS, as core1 is not running yet.
+ */
+static void configure_top_csr(void)
 {
-	uint32_t bit_pos[][6] = {
-		
-		{17, 15, 13, 16, 14, 17},
-		
-		{22, 20, 18, 21, 19, 22},
-	};
-	uint32_t mpa5_cfg_ctl[2] = {0x30, 0x48};
 	void __iomem *base_ptr;
 	unsigned int value = 0;
-	unsigned int cpu;
-	int i;
 
-	
+	base_ptr = core1_reset_base();
+	if (!base_ptr)
+		return;
+
+	/* bring the core1 out of reset */
+	__raw_writel(0x3, base_ptr);
+	mb();
+	/*
+	 * override DBGNOPOWERDN and program the GDFS
+	 * count val
+	 */
+
+	 __raw_writel(0x00030002, (MSM_CFG_CTL_BASE + 0x38));
+	mb();
+
+	/* Initialize the SPM0 and SPM1 registers */
 	msm_spm_reinit();
 
-	for_each_possible_cpu(cpu) {
-		
-		if (!cpu)
-			continue;
+	/* enable TCSR for core1 */
+	value = __raw_readl((MSM_CFG_CTL_BASE + MPA5_CFG_CTL_REG));
+	value |= BIT(22);
+	__raw_writel(value,  MSM_CFG_CTL_BASE + MPA5_CFG_CTL_REG);
+	mb();
 
-		base_ptr = core_reset_base(cpu);
-		if (!base_ptr)
-			return;
+	/* set reset bit for SPM1 */
+	value = __raw_readl((MSM_CFG_CTL_BASE + MPA5_CFG_CTL_REG));
+	value |= BIT(20);
+	__raw_writel(value,  MSM_CFG_CTL_BASE + MPA5_CFG_CTL_REG);
+	mb();
 
-		
-		__raw_writel(0x3, base_ptr);
-		mb();
+	/* set CLK_OFF bit */
+	value = __raw_readl((MSM_CFG_CTL_BASE + MPA5_CFG_CTL_REG));
+	value |= BIT(18);
+	__raw_writel(value,  MSM_CFG_CTL_BASE + MPA5_CFG_CTL_REG);
+	mb();
 
-		for (i = 0; i < 5; i++) {
-			value = __raw_readl(MSM_CFG_CTL_BASE +
-							mpa5_cfg_ctl[cpu/2]);
-			value |= BIT(bit_pos[cpu%2][i]);
-			__raw_writel(value,  MSM_CFG_CTL_BASE +
-							mpa5_cfg_ctl[cpu/2]);
-			mb();
-		}
+	/* set clamps bit */
+	value = __raw_readl((MSM_CFG_CTL_BASE + MPA5_CFG_CTL_REG));
+	value |= BIT(21);
+	__raw_writel(value,  MSM_CFG_CTL_BASE + MPA5_CFG_CTL_REG);
+	mb();
 
-		
-		value = __raw_readl(MSM_CFG_CTL_BASE +
-						mpa5_cfg_ctl[cpu/2]);
-		value &= ~BIT(bit_pos[cpu%2][i]);
-		__raw_writel(value,  MSM_CFG_CTL_BASE +
-						mpa5_cfg_ctl[cpu/2]);
-		mb();
+	/* set power_up bit */
+	value = __raw_readl((MSM_CFG_CTL_BASE + MPA5_CFG_CTL_REG));
+	value |= BIT(19);
+	__raw_writel(value,  MSM_CFG_CTL_BASE + MPA5_CFG_CTL_REG);
+	mb();
 
-		__raw_writel(0x0, base_ptr);
-		mb();
-	}
+	/* Disable TSCR for core0 */
+	value = __raw_readl((MSM_CFG_CTL_BASE + MPA5_CFG_CTL_REG));
+	value &= ~BIT(22);
+	__raw_writel(value,  MSM_CFG_CTL_BASE + MPA5_CFG_CTL_REG);
+	mb();
+	__raw_writel(0x0, base_ptr);
+	mb();
 }
 
+/*
+ * Clear hardware registers after Apps powers up.
+ */
 static void msm_pm_config_hw_after_power_up(void)
 {
 
@@ -549,13 +556,20 @@ static void msm_pm_config_hw_after_power_up(void)
 		__raw_writel(0, APPS_PWRDOWN);
 		mb();
 		msm_spm_reinit();
-	} else if (cpu_is_msm8625() || cpu_is_msm8625q()) {
+	} else if (cpu_is_msm8625()) {
 		__raw_writel(0, APPS_PWRDOWN);
 		mb();
 
-		if (per_cpu(power_collapsed, 1)) {
+		if (power_collapsed) {
+			/*
+			 * enable the SCU while coming out of power
+			 * collapse.
+			 */
 			scu_enable(MSM_SCU_BASE);
-			msm_pm_configure_top_csr();
+			/*
+			 * Program the top csr to put the core1 into GDFS.
+			 */
+			configure_top_csr();
 		}
 	} else {
 		__raw_writel(0, APPS_PWRDOWN);
@@ -565,6 +579,9 @@ static void msm_pm_config_hw_after_power_up(void)
 	}
 }
 
+/*
+ * Configure hardware registers in preparation for SWFI.
+ */
 static void msm_pm_config_hw_before_swfi(void)
 {
 	if (cpu_is_qsd8x50()) {
@@ -581,22 +598,30 @@ static void msm_pm_config_hw_before_swfi(void)
 	}
 }
 
+/*
+ * Respond to timing out waiting for Modem
+ *
+ * NOTE: The function never returns.
+ */
 static void msm_pm_timeout(void)
 {
 #if defined(CONFIG_MSM_PM_TIMEOUT_RESET_CHIP)
-	printk(KERN_EMERG "[K] %s(): resetting chip\n", __func__);
+	printk(KERN_EMERG "%s(): resetting chip\n", __func__);
 	msm_proc_comm(PCOM_RESET_CHIP_IMM, NULL, NULL);
 #elif defined(CONFIG_MSM_PM_TIMEOUT_RESET_MODEM)
-	printk(KERN_EMERG "[K] %s(): resetting modem\n", __func__);
+	printk(KERN_EMERG "%s(): resetting modem\n", __func__);
 	msm_proc_comm_reset_modem_now();
 #elif defined(CONFIG_MSM_PM_TIMEOUT_HALT)
-	printk(KERN_EMERG "[K] %s(): halting\n", __func__);
+	printk(KERN_EMERG "%s(): halting\n", __func__);
 #endif
 	for (;;)
 		;
 }
 
 
+/******************************************************************************
+ * State Polling Definitions
+ *****************************************************************************/
 
 struct msm_pm_polled_group {
 	uint32_t group_id;
@@ -609,31 +634,59 @@ struct msm_pm_polled_group {
 	uint32_t value_read;
 };
 
+/*
+ * Return true if all bits indicated by flag are set in source.
+ */
 static inline bool msm_pm_all_set(uint32_t source, uint32_t flag)
 {
 	return (source & flag) == flag;
 }
 
+/*
+ * Return true if any bit indicated by flag are set in source.
+ */
 static inline bool msm_pm_any_set(uint32_t source, uint32_t flag)
 {
 	return !flag || (source & flag);
 }
 
+/*
+ * Return true if all bits indicated by flag are cleared in source.
+ */
 static inline bool msm_pm_all_clear(uint32_t source, uint32_t flag)
 {
 	return (~source & flag) == flag;
 }
 
+/*
+ * Return true if any bit indicated by flag are cleared in source.
+ */
 static inline bool msm_pm_any_clear(uint32_t source, uint32_t flag)
 {
 	return !flag || (~source & flag);
 }
 
+/*
+ * Poll the shared memory states as indicated by the poll groups.
+ *
+ * nr_grps: number of groups in the array
+ * grps: array of groups
+ *
+ * The function returns when conditions specified by any of the poll
+ * groups become true.  The conditions specified by a poll group are
+ * deemed true when 1) at least one bit from bits_any_set is set OR one
+ * bit from bits_any_clear is cleared; and 2) all bits in bits_all_set
+ * are set; and 3) all bits in bits_all_clear are cleared.
+ *
+ * Return value:
+ *      >=0: index of the poll group whose conditions have become true
+ *      -ETIMEDOUT: timed out
+ */
 static int msm_pm_poll_state(int nr_grps, struct msm_pm_polled_group *grps)
 {
 	int i, k;
 
-	for (i = 0; i < 2500000; i++) {
+	for (i = 0; i < 50000; i++) {
 		for (k = 0; k < nr_grps; k++) {
 			bool all_set, all_clear;
 			bool any_set, any_clear;
@@ -652,10 +705,10 @@ static int msm_pm_poll_state(int nr_grps, struct msm_pm_polled_group *grps)
 			if (all_set && all_clear && (any_set || any_clear))
 				return k;
 		}
-		udelay(1);
+		udelay(50);
 	}
 
-	printk(KERN_ERR "[K] %s failed:\n", __func__);
+	printk(KERN_ERR "%s failed:\n", __func__);
 	for (k = 0; k < nr_grps; k++)
 		printk(KERN_ERR "(%x, %x, %x, %x) %x\n",
 			grps[k].bits_all_set, grps[k].bits_all_clear,
@@ -666,6 +719,9 @@ static int msm_pm_poll_state(int nr_grps, struct msm_pm_polled_group *grps)
 }
 
 
+/******************************************************************************
+ * Suspend Max Sleep Time
+ *****************************************************************************/
 
 #define SCLK_HZ (32768)
 #define MSM_PM_SLEEP_TICK_LIMIT (0x6DDD000)
@@ -678,12 +734,19 @@ module_param_named(sleep_time_override,
 
 static uint32_t msm_pm_max_sleep_time;
 
+/*
+ * Convert time from nanoseconds to slow clock ticks, then cap it to the
+ * specified limit
+ */
 static int64_t msm_pm_convert_and_cap_time(int64_t time_ns, int64_t limit)
 {
 	do_div(time_ns, NSEC_PER_SEC / SCLK_HZ);
 	return (time_ns > limit) ? limit : time_ns;
 }
 
+/*
+ * Set the sleep time for suspend.  0 means infinite sleep time.
+ */
 void msm_pm_set_max_sleep_time(int64_t max_sleep_time_ns)
 {
 	unsigned long flags;
@@ -707,9 +770,13 @@ void msm_pm_set_max_sleep_time(int64_t max_sleep_time_ns)
 EXPORT_SYMBOL(msm_pm_set_max_sleep_time);
 
 
+/******************************************************************************
+ * Shared Memory Bits
+ *****************************************************************************/
 
 #define DEM_MASTER_BITS_PER_CPU             6
 
+/* Power Master State Bits - Per CPU */
 #define DEM_MASTER_SMSM_RUN \
 	(0x01UL << (DEM_MASTER_BITS_PER_CPU * SMSM_APPS_STATE))
 #define DEM_MASTER_SMSM_RSA \
@@ -723,6 +790,7 @@ EXPORT_SYMBOL(msm_pm_set_max_sleep_time);
 #define DEM_MASTER_SMSM_SLEEP \
 	(0x20UL << (DEM_MASTER_BITS_PER_CPU * SMSM_APPS_STATE))
 
+/* Power Slave State Bits */
 #define DEM_SLAVE_SMSM_RUN                  (0x0001)
 #define DEM_SLAVE_SMSM_PWRC                 (0x0002)
 #define DEM_SLAVE_SMSM_PWRC_DELAY           (0x0004)
@@ -735,6 +803,9 @@ EXPORT_SYMBOL(msm_pm_set_max_sleep_time);
 #define DEM_SLAVE_SMSM_PWRC_SUSPEND         (0x0200)
 
 
+/******************************************************************************
+ * Shared Memory Data
+ *****************************************************************************/
 
 #define DEM_MAX_PORT_NAME_LEN (20)
 
@@ -753,6 +824,9 @@ struct msm_pm_smem_t {
 };
 
 
+/******************************************************************************
+ *
+ *****************************************************************************/
 static struct msm_pm_smem_t *msm_pm_smem_data;
 static atomic_t msm_pm_init_done = ATOMIC_INIT(0);
 
@@ -767,6 +841,16 @@ static int msm_pm_modem_busy(void)
 	return 0;
 }
 
+/*
+ * Power collapse the Apps processor.  This function executes the handshake
+ * protocol with Modem.
+ *
+ * Return value:
+ *      -EAGAIN: modem reset occurred or early exit from power collapse
+ *      -EBUSY: modem not ready for our power collapse -- no power loss
+ *      -ETIMEDOUT: timed out waiting for modem's handshake -- no power loss
+ *      0: success
+ */
 static int msm_pm_power_collapse
 	(bool from_idle, uint32_t sleep_delay, uint32_t sleep_limit)
 {
@@ -791,8 +875,8 @@ static int msm_pm_power_collapse
 
 	memset(msm_pm_smem_data, 0, sizeof(*msm_pm_smem_data));
 
-	if (cpu_is_msm8625() || cpu_is_msm8625q()) {
-		
+	if (cpu_is_msm8625()) {
+		/* Program the SPM */
 		ret = msm_spm_set_low_power_mode(MSM_SPM_MODE_POWER_COLLAPSE,
 									false);
 		WARN_ON(ret);
@@ -803,31 +887,13 @@ static int msm_pm_power_collapse
 
 	msm_pm_irq_extns->enter_sleep1(true, from_idle,
 						&msm_pm_smem_data->irq_mask);
-
-	if (((!from_idle) && (MSM_PM_DEBUG_CLOCK & msm_pm_debug_mask)) ||
-			((from_idle) && (MSM_PM_DEBUG_IDLE_CLOCK & msm_pm_debug_mask))) {
-			clock_debug_print_enabled();
-	}
+	msm_sirc_enter_sleep();
+	msm_gpio_enter_sleep(from_idle);
 
 	msm_pm_smem_data->sleep_time = sleep_delay;
 	msm_pm_smem_data->resources_used = sleep_limit;
 
-	saved_acpuclk_rate = acpuclk_power_collapse();
-
-	if (!from_idle)
-		MSM_PM_DPRINTK(MSM_PM_DEBUG_CLOCK, KERN_INFO,
-			"%s(): change clock rate (old rate = %lu)\n", __func__,
-			saved_acpuclk_rate);
-
-	if (saved_acpuclk_rate == 0) {
-		ret = -EAGAIN;
-		goto acpu_set_clock_fail;
-	}
-
-	msm_sirc_enter_sleep();
-	msm_gpio_enter_sleep(from_idle);
-
-	
+	/* Enter PWRC/PWRC_SUSPEND */
 
 	if (from_idle)
 		smsm_change_state(SMSM_APPS_DEM, DEM_SLAVE_SMSM_RUN,
@@ -837,7 +903,7 @@ static int msm_pm_power_collapse
 			DEM_SLAVE_SMSM_PWRC | DEM_SLAVE_SMSM_PWRC_SUSPEND);
 
 	MSM_PM_DEBUG_PRINT_STATE("msm_pm_power_collapse(): PWRC");
-	MSM_PM_DEBUG_PRINT_SLEEP_INFO(from_idle);
+	MSM_PM_DEBUG_PRINT_SLEEP_INFO();
 
 	memset(state_grps, 0, sizeof(state_grps));
 	state_grps[0].group_id = SMSM_POWER_MASTER_DEM;
@@ -848,9 +914,9 @@ static int msm_pm_power_collapse
 	ret = msm_pm_poll_state(ARRAY_SIZE(state_grps), state_grps);
 
 	if (ret < 0) {
-		printk(KERN_EMERG "[K] %s(): power collapse entry "
+		printk(KERN_EMERG "%s(): power collapse entry "
 			"timed out waiting for Modem's response\n", __func__);
-		goto power_collapse_early_exit;
+		msm_pm_timeout();
 	}
 
 	if (ret == 1) {
@@ -862,7 +928,7 @@ static int msm_pm_power_collapse
 		goto power_collapse_early_exit;
 	}
 
-	
+	/* DEM Master in RSA */
 
 	MSM_PM_DEBUG_PRINT_STATE("msm_pm_power_collapse(): PWRC RSA");
 
@@ -879,6 +945,16 @@ static int msm_pm_power_collapse
 	msm_pm_config_hw_before_power_down();
 	MSM_PM_DEBUG_PRINT_STATE("msm_pm_power_collapse(): pre power down");
 
+	saved_acpuclk_rate = acpuclk_power_collapse();
+	MSM_PM_DPRINTK(MSM_PM_DEBUG_CLOCK, KERN_INFO,
+		"%s(): change clock rate (old rate = %lu)\n", __func__,
+		saved_acpuclk_rate);
+
+	if (saved_acpuclk_rate == 0) {
+		msm_pm_config_hw_after_power_up();
+		goto power_collapse_early_exit;
+	}
+
 	msm_pm_boot_config_before_pc(smp_processor_id(),
 			virt_to_phys(msm_pm_collapse_exit));
 
@@ -888,50 +964,37 @@ static int msm_pm_power_collapse
 #endif
 
 #ifdef CONFIG_CACHE_L2X0
-	if (!cpu_is_msm8625() && !cpu_is_msm8625q())
+	if (!cpu_is_msm8625())
 		l2cc_suspend();
 	else
 		apps_power_collapse = 1;
 #endif
-	if (!from_idle)
-		printk(KERN_INFO "[K][R] suspend end\n");
-	msm_pm_irq_extns->read_active_irq();
+
 	collapsed = msm_pm_collapse();
 
-	if (cpu_is_msm8625() || cpu_is_msm8625q()) {
-		int cpu;
+	/*
+	 * TBD: Currently recognise the MODEM early exit
+	 * path by reading the MPA5_GDFS_CNT_VAL register.
+	 */
+	if (cpu_is_msm8625()) {
+		/*
+		 * on system reset, default value of MPA5_GDFS_CNT_VAL
+		 * is = 0x0, later modem reprogram this value to
+		 * 0x00030004. Once APPS did a power collapse and
+		 * coming out of it expected value of this register
+		 * always be 0x00030004. Incase if APPS sees the value
+		 * as 0x00030002 consider this case as a modem early
+		 * exit.
+		 */
 		val = __raw_readl(MSM_CFG_CTL_BASE + 0x38);
-		
-		if (cpu_is_msm8625q()) {			
-			if (val != 0x000F0002) {
-				for_each_possible_cpu(cpu) {
-					if (!cpu)
-						continue;
-					per_cpu(power_collapsed, cpu) = 1;
-				}
-				power_collapsed = 1;
-				 __raw_writel(0x000F0002,
-						 (MSM_CFG_CTL_BASE + 0x38));
-			} else
-				modem_early_exit = 1;
-		} else {
-			if (val != 0x00030002) {
-				for_each_possible_cpu(cpu) {
-					if (!cpu)
-						continue;
-					per_cpu(power_collapsed, cpu) = 1;
-				}
-				power_collapsed = 1;
-				 __raw_writel(0x00030002,
-						 (MSM_CFG_CTL_BASE + 0x38));
-			} else
-				modem_early_exit = 1;
-		}
+		if (val != 0x00030002)
+			power_collapsed = 1;
+		else
+			modem_early_exit = 1;
 	}
-	if (!from_idle)
-		printk(KERN_INFO "[K][R] resume start\n");
+
 #ifdef CONFIG_CACHE_L2X0
-	if (!cpu_is_msm8625() && !cpu_is_msm8625q())		
+	if (!cpu_is_msm8625())
 		l2cc_resume();
 	else
 		apps_power_collapse = 0;
@@ -952,6 +1015,14 @@ static int msm_pm_power_collapse
 		KERN_INFO,
 		"%s(): msm_pm_collapse returned %d\n", __func__, collapsed);
 
+	MSM_PM_DPRINTK(MSM_PM_DEBUG_CLOCK, KERN_INFO,
+		"%s(): restore clock rate to %lu\n", __func__,
+		saved_acpuclk_rate);
+	if (acpuclk_set_rate(smp_processor_id(), saved_acpuclk_rate,
+			SETRATE_PC) < 0)
+		printk(KERN_ERR "%s(): failed to restore clock rate(%lu)\n",
+			__func__, saved_acpuclk_rate);
+
 	msm_pm_irq_extns->exit_sleep1(msm_pm_smem_data->irq_mask,
 		msm_pm_smem_data->wakeup_reason,
 		msm_pm_smem_data->pending_irqs);
@@ -969,9 +1040,9 @@ static int msm_pm_power_collapse
 	ret = msm_pm_poll_state(ARRAY_SIZE(state_grps), state_grps);
 
 	if (ret < 0) {
-		printk(KERN_EMERG "[K] %s(): power collapse exit "
+		printk(KERN_EMERG "%s(): power collapse exit "
 			"timed out waiting for Modem's response\n", __func__);
-		goto power_collapse_early_exit;
+		msm_pm_timeout();
 	}
 
 	if (ret == 1) {
@@ -983,14 +1054,16 @@ static int msm_pm_power_collapse
 		goto power_collapse_early_exit;
 	}
 
-	
+	/* Sanity check */
 	if (collapsed && !modem_early_exit) {
-		
+		BUG_ON(!(state_grps[0].value_read & DEM_MASTER_SMSM_RSA));
 	} else {
+		BUG_ON(!(state_grps[0].value_read &
+			DEM_MASTER_SMSM_PWRC_EARLY_EXIT));
 		goto power_collapse_early_exit;
 	}
 
-	
+	/* Enter WFPI */
 
 	smsm_change_state(SMSM_APPS_DEM,
 		DEM_SLAVE_SMSM_PWRC | DEM_SLAVE_SMSM_PWRC_SUSPEND,
@@ -1007,10 +1080,9 @@ static int msm_pm_power_collapse
 	ret = msm_pm_poll_state(ARRAY_SIZE(state_grps), state_grps);
 
 	if (ret < 0) {
-		printk(KERN_EMERG "[K] %s(): power collapse WFPI "
+		printk(KERN_EMERG "%s(): power collapse WFPI "
 			"timed out waiting for Modem's response\n", __func__);
-		
-		
+		msm_pm_timeout();
 	}
 
 	if (ret == 1) {
@@ -1023,20 +1095,10 @@ static int msm_pm_power_collapse
 		goto power_collapse_restore_gpio_bail;
 	}
 
-	if (!from_idle)
-		MSM_PM_DPRINTK(MSM_PM_DEBUG_CLOCK, KERN_INFO,
-			"%s(): restore clock rate to %lu\n", __func__,
-			saved_acpuclk_rate);
-
-	if (acpuclk_set_rate(smp_processor_id(), saved_acpuclk_rate,
-			SETRATE_PC) < 0)
-		printk(KERN_ERR "%s(): failed to restore clock rate(%lu)\n",
-			__func__, saved_acpuclk_rate);
-
-	
+	/* DEM Master == RUN */
 
 	MSM_PM_DEBUG_PRINT_STATE("msm_pm_power_collapse(): WFPI RUN");
-	MSM_PM_DEBUG_PRINT_SLEEP_INFO(from_idle);
+	MSM_PM_DEBUG_PRINT_SLEEP_INFO();
 
 	msm_pm_irq_extns->exit_sleep2(msm_pm_smem_data->irq_mask,
 		msm_pm_smem_data->wakeup_reason,
@@ -1051,11 +1113,10 @@ static int msm_pm_power_collapse
 		DEM_SLAVE_SMSM_WFPI, DEM_SLAVE_SMSM_RUN);
 
 	MSM_PM_DEBUG_PRINT_STATE("msm_pm_power_collapse(): RUN");
-	MSM_PM_DEBUG_PRINT_SLEEP_INFO(from_idle);
 
 	smd_sleep_exit();
 
-	if (cpu_is_msm8625() || cpu_is_msm8625q()) {
+	if (cpu_is_msm8625()) {
 		ret = msm_spm_set_low_power_mode(MSM_SPM_MODE_CLOCK_GATING,
 									false);
 		WARN_ON(ret);
@@ -1067,7 +1128,7 @@ static int msm_pm_power_collapse
 	return 0;
 
 power_collapse_early_exit:
-	
+	/* Enter PWRC_EARLY_EXIT */
 
 	smsm_change_state(SMSM_APPS_DEM,
 		DEM_SLAVE_SMSM_PWRC | DEM_SLAVE_SMSM_PWRC_SUSPEND,
@@ -1084,9 +1145,11 @@ power_collapse_early_exit:
 	ret = msm_pm_poll_state(ARRAY_SIZE(state_grps), state_grps);
 	MSM_PM_DEBUG_PRINT_STATE("msm_pm_power_collapse(): EARLY_EXIT EE");
 
-	if (ret < 0)
-		printk(KERN_EMERG "[K] %s(): power collapse EARLY_EXIT "
+	if (ret < 0) {
+		printk(KERN_EMERG "%s(): power collapse EARLY_EXIT "
 			"timed out waiting for Modem's response\n", __func__);
+		msm_pm_timeout();
+	}
 
 	if (ret == 1) {
 		MSM_PM_DPRINTK(
@@ -1096,7 +1159,7 @@ power_collapse_early_exit:
 			__func__);
 	}
 
-	
+	/* DEM Master == RESET or PWRC_EARLY_EXIT */
 
 	ret = -EAGAIN;
 
@@ -1104,31 +1167,21 @@ power_collapse_restore_gpio_bail:
 	msm_gpio_exit_sleep();
 	msm_sirc_exit_sleep();
 
-	
+	/* Enter RUN */
 	smsm_change_state(SMSM_APPS_DEM,
 		DEM_SLAVE_SMSM_PWRC | DEM_SLAVE_SMSM_PWRC_SUSPEND |
-		DEM_SLAVE_SMSM_PWRC_EARLY_EXIT | DEM_SLAVE_SMSM_WFPI,
-		DEM_SLAVE_SMSM_RUN);
+		DEM_SLAVE_SMSM_PWRC_EARLY_EXIT, DEM_SLAVE_SMSM_RUN);
 
 	MSM_PM_DEBUG_PRINT_STATE("msm_pm_power_collapse(): RUN");
-
-	MSM_PM_DPRINTK(MSM_PM_DEBUG_CLOCK, KERN_INFO,
-		"%s(): restore clock rate to %lu\n", __func__,
-		saved_acpuclk_rate);
-	if (acpuclk_set_rate(smp_processor_id(), saved_acpuclk_rate,
-			SETRATE_PC) < 0)
-		printk(KERN_ERR "%s(): failed to restore clock rate(%lu)\n",
-			__func__, saved_acpuclk_rate);
 
 	if (collapsed)
 		smd_sleep_exit();
 
-acpu_set_clock_fail:
-	if (msm_cpr_ops && from_idle)
+	if (msm_cpr_ops)
 		msm_cpr_ops->cpr_resume();
 
 power_collapse_bail:
-	if (cpu_is_msm8625() || cpu_is_msm8625q()) {
+	if (cpu_is_msm8625()) {
 		ret = msm_spm_set_low_power_mode(MSM_SPM_MODE_CLOCK_GATING,
 									false);
 		WARN_ON(ret);
@@ -1137,6 +1190,12 @@ power_collapse_bail:
 	return ret;
 }
 
+/*
+ * Power collapse the Apps processor without involving Modem.
+ *
+ * Return value:
+ *      0: success
+ */
 static int __ref msm_pm_power_collapse_standalone(bool from_idle)
 {
 	int collapsed = 0;
@@ -1160,17 +1219,14 @@ static int __ref msm_pm_power_collapse_standalone(bool from_idle)
 #endif
 
 #ifdef CONFIG_CACHE_L2X0
-	if (!cpu_is_msm8625() && !cpu_is_msm8625q())
+	if (!cpu_is_msm8625())
 		l2cc_suspend();
 #endif
 
-	msm_pm_irq_extns->read_active_irq();
 	collapsed = msm_pm_collapse();
 
-	if (!from_idle)
-		printk(KERN_INFO "[K][R] resume start\n");
 #ifdef CONFIG_CACHE_L2X0
-	if (!cpu_is_msm8625() && !cpu_is_msm8625q())
+	if (!cpu_is_msm8625())
 		l2cc_resume();
 #endif
 
@@ -1194,38 +1250,40 @@ static int __ref msm_pm_power_collapse_standalone(bool from_idle)
 	return !collapsed;
 }
 
-static int msm_pm_swfi(bool from_idle, bool ramp_acpu)
+/*
+ * Bring the Apps processor to SWFI.
+ *
+ * Return value:
+ *      -EIO: could not ramp Apps processor clock
+ *      0: success
+ */
+static int msm_pm_swfi(bool ramp_acpu)
 {
 	unsigned long saved_acpuclk_rate = 0;
 
 	if (ramp_acpu) {
 		saved_acpuclk_rate = acpuclk_wait_for_irq();
-
-		if (!from_idle)
-			MSM_PM_DPRINTK(MSM_PM_DEBUG_CLOCK, KERN_INFO,
-				"%s(): change clock rate (old rate = %lu)\n", __func__,
-				saved_acpuclk_rate);
+		MSM_PM_DPRINTK(MSM_PM_DEBUG_CLOCK, KERN_INFO,
+			"%s(): change clock rate (old rate = %lu)\n", __func__,
+			saved_acpuclk_rate);
 
 		if (!saved_acpuclk_rate)
 			return -EIO;
 	}
 
-	if (!cpu_is_msm8625() && !cpu_is_msm8625q())
+	if (!cpu_is_msm8625())
 		msm_pm_config_hw_before_swfi();
 
-	msm_pm_irq_extns->read_active_irq();
 	msm_arch_idle();
 
 	if (ramp_acpu) {
-		if (!from_idle)
-			MSM_PM_DPRINTK(MSM_PM_DEBUG_CLOCK, KERN_INFO,
-				"%s(): restore clock rate to %lu\n", __func__,
-				saved_acpuclk_rate);
-
+		MSM_PM_DPRINTK(MSM_PM_DEBUG_CLOCK, KERN_INFO,
+			"%s(): restore clock rate to %lu\n", __func__,
+			saved_acpuclk_rate);
 		if (acpuclk_set_rate(smp_processor_id(), saved_acpuclk_rate,
 				SETRATE_SWFI) < 0)
 			printk(KERN_ERR
-				"[K] %s(): failed to restore clock rate(%lu)\n",
+				"%s(): failed to restore clock rate(%lu)\n",
 				__func__, saved_acpuclk_rate);
 	}
 
@@ -1257,12 +1315,17 @@ static int64_t msm_pm_timer_exit_suspend(int64_t time, int64_t period)
 	return time;
 }
 
+/******************************************************************************
+ * External Idle/Suspend Functions
+ *****************************************************************************/
 
+/*
+ * Put CPU in low power mode.
+ */
 void arch_idle(void)
 {
 	bool allow[MSM_PM_SLEEP_MODE_NR];
 	uint32_t sleep_limit = SLEEP_LIMIT_NONE;
-	enum msm_pm_sleep_mode sleep_mode = MSM_PM_SLEEP_MODE_NR;
 
 	int64_t timer_expiration;
 	int latency_qos;
@@ -1278,7 +1341,7 @@ void arch_idle(void)
 
 	cpu = smp_processor_id();
 	latency_qos = pm_qos_request(PM_QOS_CPU_DMA_LATENCY);
-	
+	/* get the next timer expiration */
 	timer_expiration = ktime_to_ns(tick_nohz_get_sleep_length());
 
 	t1 = ktime_to_ns(ktime_get());
@@ -1294,7 +1357,6 @@ void arch_idle(void)
 		!msm_pm_irq_extns->idle_sleep_allowed()) {
 		allow[MSM_PM_SLEEP_MODE_POWER_COLLAPSE] = false;
 		allow[MSM_PM_SLEEP_MODE_POWER_COLLAPSE_NO_XO_SHUTDOWN] = false;
-		allow[MSM_PM_SLEEP_MODE_POWER_COLLAPSE_STANDALONE] = false;
 	}
 
 	for (i = 0; i < ARRAY_SIZE(allow); i++) {
@@ -1337,15 +1399,17 @@ void arch_idle(void)
 
 	if (allow[MSM_PM_SLEEP_MODE_POWER_COLLAPSE] ||
 		allow[MSM_PM_SLEEP_MODE_POWER_COLLAPSE_NO_XO_SHUTDOWN]) {
+		/* Sync the timer with SCLK, it is needed only for modem
+		 * assissted pollapse case.
+		 */
 		int64_t next_timer_exp = msm_timer_enter_idle();
 		uint32_t sleep_delay;
 		bool low_power = false;
 
-		sleep_mode = MSM_PM_SLEEP_MODE_POWER_COLLAPSE;
 		sleep_delay = (uint32_t) msm_pm_convert_and_cap_time(
 			next_timer_exp, MSM_PM_SLEEP_TICK_LIMIT);
 
-		if (sleep_delay == 0) 
+		if (sleep_delay == 0) /* 0 would mean infinite time */
 			sleep_delay = 1;
 
 		if (!allow[MSM_PM_SLEEP_MODE_POWER_COLLAPSE])
@@ -1368,22 +1432,18 @@ void arch_idle(void)
 			msm_pm_sleep_limit = sleep_limit;
 		}
 	} else if (allow[MSM_PM_SLEEP_MODE_POWER_COLLAPSE_STANDALONE]) {
-		sleep_mode = MSM_PM_SLEEP_MODE_POWER_COLLAPSE_STANDALONE;
 		ret = msm_pm_power_collapse_standalone(true);
 		exit_stat = ret ?
 			MSM_PM_STAT_IDLE_FAILED_STANDALONE_POWER_COLLAPSE :
 			MSM_PM_STAT_IDLE_STANDALONE_POWER_COLLAPSE;
 	} else if (allow[MSM_PM_SLEEP_MODE_RAMP_DOWN_AND_WAIT_FOR_INTERRUPT]) {
-		sleep_mode = MSM_PM_SLEEP_MODE_RAMP_DOWN_AND_WAIT_FOR_INTERRUPT;
-		ret = msm_pm_swfi(true, true);
+		ret = msm_pm_swfi(true);
 		if (ret)
 			while (!msm_pm_irq_extns->irq_pending())
 				udelay(1);
 		exit_stat = ret ? MSM_PM_STAT_IDLE_SPIN : MSM_PM_STAT_IDLE_WFI;
 	} else if (allow[MSM_PM_SLEEP_MODE_WAIT_FOR_INTERRUPT]) {
-		sleep_mode = MSM_PM_SLEEP_MODE_WAIT_FOR_INTERRUPT;
-		msm_pm_swfi(true, false);
-
+		msm_pm_swfi(false);
 		exit_stat = MSM_PM_STAT_IDLE_WFI;
 	} else {
 		while (!msm_pm_irq_extns->irq_pending())
@@ -1393,10 +1453,20 @@ void arch_idle(void)
 
 	__get_cpu_var(t2) = ktime_to_ns(ktime_get());
 	msm_pm_add_stat(exit_stat, __get_cpu_var(t2) - t1);
-	htc_idle_stat_add(sleep_mode, (u32)(t2 - t1)/1000);
-
 }
 
+/*
+ * Suspend the Apps processor.
+ *
+ * Return value:
+ *	-EPERM: Suspend happened by a not permitted core
+ *      -EAGAIN: modem reset occurred or early exit from suspend
+ *      -EBUSY: modem not ready for our suspend
+ *      -EINVAL: invalid sleep mode
+ *      -EIO: could not ramp Apps processor clock
+ *      -ETIMEDOUT: timed out waiting for modem's handshake
+ *      0: success
+ */
 static int msm_pm_enter(suspend_state_t state)
 {
 	bool allow[MSM_PM_SLEEP_MODE_NR];
@@ -1406,19 +1476,13 @@ static int msm_pm_enter(suspend_state_t state)
 	int64_t period = 0;
 	int64_t time = 0;
 
-	
+	/* Must executed by CORE0 */
 	if (smp_processor_id()) {
 		__WARN();
 		goto suspend_exit;
 	}
 
 	time = msm_pm_timer_enter_suspend(&period);
-
-	if (board_mfg_mode() == 4) {
-		gpio_set_diag_gpio_table(
-			(unsigned long *)board_get_mfg_sleep_gpio_table());
-		pr_info("power test mode : gpio_set_diag_gpio_table\n");
-	}
 
 	MSM_PM_DPRINTK(MSM_PM_DEBUG_SUSPEND, KERN_INFO,
 		"%s(): sleep limit %u\n", __func__, sleep_limit);
@@ -1437,6 +1501,7 @@ static int msm_pm_enter(suspend_state_t state)
 		allow[MSM_PM_SLEEP_MODE_POWER_COLLAPSE_NO_XO_SHUTDOWN]) {
 		enum msm_pm_time_stats_id id;
 
+		clock_debug_print_enabled();
 
 #ifdef CONFIG_MSM_SLEEP_TIME_OVERRIDE
 		if (msm_pm_sleep_time_override > 0) {
@@ -1476,16 +1541,12 @@ static int msm_pm_enter(suspend_state_t state)
 	} else if (allow[MSM_PM_SLEEP_MODE_POWER_COLLAPSE_STANDALONE]) {
 		ret = msm_pm_power_collapse_standalone(false);
 	} else if (allow[MSM_PM_SLEEP_MODE_RAMP_DOWN_AND_WAIT_FOR_INTERRUPT]) {
-		printk(KERN_INFO "[K][R] suspend end\n");
-		ret = msm_pm_swfi(false, true);
-		printk(KERN_INFO "[K][R] resume start\n");
+		ret = msm_pm_swfi(true);
 		if (ret)
 			while (!msm_pm_irq_extns->irq_pending())
 				udelay(1);
 	} else if (allow[MSM_PM_SLEEP_MODE_WAIT_FOR_INTERRUPT]) {
-		printk(KERN_INFO "[K][R] suspend end\n");
-		msm_pm_swfi(false, false);
-		printk(KERN_INFO "[K][R] resume start\n");
+		msm_pm_swfi(false);
 	}
 
 suspend_exit:
@@ -1500,31 +1561,9 @@ static struct platform_suspend_ops msm_pm_ops = {
 	.valid = suspend_valid_only_mem,
 };
 
-static bool console_flushed;
-
-void msm_pm_flush_console(void)
-{
-	if (console_flushed)
-		return;
-	console_flushed = true;
-
-	printk(KERN_EMERG "\n");
-	printk(KERN_EMERG "[K] Restarting %s\n", linux_banner);
-	if (console_trylock()) {
-		console_unlock();
-		return;
-	}
-
-	mdelay(50);
-
-	local_irq_disable();
-	if (!console_trylock())
-		printk(KERN_EMERG "[K] msm_restart: Console was locked! Busting\n");
-	else
-		printk(KERN_EMERG "[K] msm_restart: Console was locked!\n");
-	console_unlock();
-}
-
+/* Hotplug the "non boot" CPU's and put
+ * the cores into low power mode
+ */
 void msm_pm_cpu_enter_lowpower(unsigned int cpu)
 {
 	bool allow[MSM_PM_SLEEP_MODE_NR];
@@ -1543,126 +1582,20 @@ void msm_pm_cpu_enter_lowpower(unsigned int cpu)
 	if (allow[MSM_PM_SLEEP_MODE_POWER_COLLAPSE_STANDALONE]) {
 		msm_pm_power_collapse_standalone(false);
 	} else if (allow[MSM_PM_SLEEP_MODE_WAIT_FOR_INTERRUPT]) {
-		msm_pm_swfi(true, false);
+		msm_pm_swfi(false);
 	} else {
 		MSM_PM_DPRINTK(MSM_PM_DEBUG_HOTPLUG, KERN_INFO,
 			"CPU%u: %s: shutting down failed!!!\n", cpu, __func__);
 	}
 }
 
-
-static uint32_t restart_reason = 0x776655AA;
-
-static void msm_pm_power_off(void)
-{
-#if 0
-	msm_rpcrouter_close();
-#endif
-#ifdef CONFIG_HTC_OFFMODE_ALARM
-        set_offmode_alarm();
-        printk(KERN_INFO "[K] msm_pm_power_off:wakeup after %d\r\n", msm_wakeup_after);
-        if (msm_wakeup_after)
-                msm_proc_comm(PCOM_SET_RTC_ALARM, &msm_wakeup_after, 0);
-#endif
-
-	msm_proc_comm(PCOM_POWER_DOWN, 0, 0);
-	for (;;)
-		;
-}
-#if 1
-static void msm_pm_restart(char str, const char *cmd)
-{
-	if (console_trylock()) {
-		console_unlock();
-	}else{
-		printk(KERN_EMERG "[K] msm_restart: Console was locked, can't flush console\n");
-	}
-
-	pr_info("[K] %s: restart_reason 0x%x, cmd %s\n", __func__, restart_reason, (cmd) ? cmd : "NULL");
-
-	
-	if (restart_reason == RESTART_REASON_RIL_FATAL)
-		msm_proc_comm(PCOM_RESET_CHIP_IMM, &restart_reason, 0);
-	else
-		msm_proc_comm(PCOM_RESET_CHIP, &restart_reason, 0);
-
-	printk(KERN_INFO "[K] @@@@@@@@@@@  msm_proc_comm end\r\n");
-
-#if defined(CONFIG_MSM_RMT_STORAGE_SERVER) || defined(CONFIG_MSM_RMT_STORAGE_CLIENT)
-	printk(KERN_INFO "[K] from %s\r\n", __func__);
-	wait_rmt_final_call_back(10);
-	printk(KERN_INFO "[K] back %s\r\n", __func__);
-	
-	mdelay(2000);
-#else
-	
-	mdelay(10000);
-#endif
-
-	printk(KERN_INFO "[K] @@@@@@@@@@@  enter msm_pm_flush_console\r\n");
-	msm_pm_flush_console();
-	printk(KERN_INFO "[K] @@@@@@@@@@@  rise PS_hold start\r\n");
-
-	
-	if (msm_hw_reset_hook) {
-		printk(KERN_INFO "[K] %s : Do HW_RESET by APP not by RADIO\r\n", __func__);
-		msm_hw_reset_hook();
-	}
-
-	for (;;)
-		;
-}
-#endif
-static int msm_reboot_call
-	(struct notifier_block *this, unsigned long code, void *_cmd)
-{
-	if ((code == SYS_RESTART) && _cmd) {
-		char *cmd = _cmd;
-		if (!strcmp(cmd, "bootloader")) {
-			restart_reason = 0x77665500;
-		} else if (!strcmp(cmd, "recovery")) {
-			restart_reason = 0x77665502;
-		} else if (!strcmp(cmd, "eraseflash")) {
-			restart_reason = 0x776655EF;
-		} else if (!strncmp(cmd, "oem-", 4)) {
-			unsigned code = simple_strtoul(cmd + 4, 0, 16) & 0xff;
-			restart_reason = 0x6f656d00 | code;
-		} else {
-			restart_reason = 0x77665501;
-		}
-	}
-	return NOTIFY_DONE;
-}
-
-static struct notifier_block msm_reboot_notifier = {
-	.notifier_call = msm_reboot_call,
-};
-
-static void __init boot_lock_nohalt(void)
-{
-	int nohalt_timeout = 0;
-
-	
-	switch (board_mfg_mode()) {
-	case 0: 
-	case 1: 
-	case 2: 
-		nohalt_timeout = BOOT_LOCK_TIMEOUT_NORMAL;
-		break;
-	case 3: 
-	case 4: 
-	case 5: 
-	default:
-		nohalt_timeout = BOOT_LOCK_TIMEOUT_SHORT;
-		break;
-	}
-	disable_hlt();
-
-	schedule_delayed_work(&work_expire_boot_lock, nohalt_timeout);
-	pr_info("Acquire 'boot-time' no_halt_lock %ds\n", nohalt_timeout / HZ);
-}
-
-
+/*
+ * Initialize the power management subsystem.
+ *
+ * Return value:
+ *      -ENODEV: initialization failed
+ *      0: success
+ */
 static int __init msm_pm_init(void)
 {
 	int ret;
@@ -1688,7 +1621,7 @@ static int __init msm_pm_init(void)
 
 	exit_phys = virt_to_phys(msm_pm_collapse_exit);
 
-	
+	/* Page table for cores to come back up safely. */
 	pc_pgd = pgd_alloc(&init_mm);
 	if (!pc_pgd)
 		return -ENOMEM;
@@ -1710,6 +1643,12 @@ static int __init msm_pm_init(void)
 	if (!msm_saved_state)
 		return -ENOMEM;
 
+	/* It is remotely possible that the code in msm_pm_collapse_exit()
+	 * which turns on the MMU with this mapping is in the
+	 * next even-numbered megabyte beyond the
+	 * start of msm_pm_collapse_exit().
+	 * Map this megabyte in as well.
+	 */
 	pmd[2] = __pmd(pmdval + (2 << (PGDIR_SHIFT - 1)));
 	flush_pmd_entry(pmd);
 	msm_pm_pc_pgd = virt_to_phys(pc_pgd);
@@ -1717,14 +1656,10 @@ static int __init msm_pm_init(void)
 		     virt_to_phys(&msm_pm_pc_pgd));
 #endif
 
-	pm_power_off = msm_pm_power_off;
-	arm_pm_restart = msm_pm_restart;
-	register_reboot_notifier(&msm_reboot_notifier);
-
 	msm_pm_smem_data = smem_alloc(SMEM_APPS_DEM_SLAVE_DATA,
 		sizeof(*msm_pm_smem_data));
 	if (msm_pm_smem_data == NULL) {
-		printk(KERN_ERR "[K] %s: failed to get smsm_data\n", __func__);
+		printk(KERN_ERR "%s: failed to get smsm_data\n", __func__);
 		return -ENODEV;
 	}
 
@@ -1734,27 +1669,34 @@ static int __init msm_pm_init(void)
 
 	ret = smsm_change_intr_mask(SMSM_POWER_MASTER_DEM, 0xFFFFFFFF, 0);
 	if (ret) {
-		printk(KERN_ERR "[K] %s: failed to clear interrupt mask, %d\n",
+		printk(KERN_ERR "%s: failed to clear interrupt mask, %d\n",
 			__func__, ret);
 		return ret;
 	}
 
-	if (cpu_is_msm8625() || cpu_is_msm8625q()) {
+	if (cpu_is_msm8625()) {
 		target_type = TARGET_IS_8625;
 		clean_caches((unsigned long)&target_type, sizeof(target_type),
 				virt_to_phys(&target_type));
 
-		if (cpu_is_msm8625q())
-			val = 0x000F0002;
-		else
-			val = 0x00030002;
-
+		/*
+		 * Configure the MPA5_GDFS_CNT_VAL register for
+		 * DBGPWRUPEREQ_OVERRIDE[17:16] = Override the
+		 * DBGNOPOWERDN for each cpu.
+		 * MPA5_GDFS_CNT_VAL[9:0] = Delay counter for
+		 * GDFS control.
+		 */
+		val = 0x00030002;
 		__raw_writel(val, (MSM_CFG_CTL_BASE + 0x38));
 
 		l2x0_base_addr = MSM_L2CC_BASE;
 	}
 
 #ifdef CONFIG_MSM_MEMORY_LOW_POWER_MODE
+	/* The wakeup_reason field is overloaded during initialization time
+	   to signal Modem that Apps will control the low power modes of
+	   the memory.
+	 */
 	msm_pm_smem_data->wakeup_reason = 1;
 	smsm_change_state(SMSM_APPS_DEM, 0, DEM_SLAVE_SMSM_RUN);
 #endif
@@ -1767,7 +1709,6 @@ static int __init msm_pm_init(void)
 	msm_pm_add_stats(enable_stats, ARRAY_SIZE(enable_stats));
 
 	atomic_set(&msm_pm_init_done, 1);
-	boot_lock_nohalt();
 	return 0;
 }
 
