@@ -624,6 +624,62 @@ void msm_hsusb_set_vbus_state(int online);
 static inline void msm_hsusb_set_vbus_state(int online) {}
 #endif
 
+/* START: add USB connected notify function */
+struct t_usb_status_notifier{
+	struct list_head notifier_link;
+	const char *name;
+	void (*func)(int cable_type);
+};
+int usb_register_notifier(struct t_usb_status_notifier *notifer);
+static LIST_HEAD(g_lh_usb_notifier_list);
+
+/***********************************
+Direction: cable detect drvier -> battery driver or other
+***********************************/
+struct t_cable_status_notifier{
+	struct list_head cable_notifier_link;
+	const char *name;
+	void (*func)(int cable_type);
+};
+int cable_detect_register_notifier(struct t_cable_status_notifier *);
+static LIST_HEAD(g_lh_calbe_detect_notifier_list);
+
+/***********************************
+Direction: 1-wire drvier -> battery driver or other
+***********************************/
+struct t_owe_charging_notifier{
+	struct list_head owe_charging_notifier_link;
+	const char *name;
+	void (*func)(int charging_type);
+};
+int owe_charging_register_notifier(struct t_owe_charging_notifier *);
+static LIST_HEAD(g_lh_owe_charging_notifier_list);
+
+/***********************************
+ Direction: sii9234 drvier -> cable detect driver
+***********************************/
+struct t_mhl_status_notifier{
+	struct list_head mhl_notifier_link;
+	const char *name;
+	void (*func)(bool isMHL, int charging_type);
+};
+int mhl_detect_register_notifier(struct t_mhl_status_notifier *);
+static LIST_HEAD(g_lh_mhl_detect_notifier_list);
+
+#if (defined(CONFIG_USB_OTG) && defined(CONFIG_USB_OTG_HOST))
+/***********************************
+Direction: cable detect drvier -> usb driver
+ ***********************************/
+struct t_usb_host_status_notifier{
+	struct list_head usb_host_notifier_link;
+	const char *name;
+	void (*func)(bool cable_in);
+};
+int usb_host_detect_register_notifier(struct t_usb_host_status_notifier *);
+static LIST_HEAD(g_lh_usb_host_detect_notifier_list);
+#endif
+/* END: add USB connected notify function */
+
 void msm_snddev_init(void);
 void msm_snddev_init_timpani(void);
 void msm_snddev_poweramp_on(void);
