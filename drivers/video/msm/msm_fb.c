@@ -60,6 +60,9 @@
 #define MSM_FB_NUM	3
 #endif
 
+static struct task_struct *htc_mdp_owner_task = NULL;
+void htc_mdp_sem_down(struct task_struct *current_task, struct semaphore *mutex);
+void htc_mdp_sem_up(struct semaphore *mutex);
 static unsigned char *fbram;
 static unsigned char *fbram_phys;
 static int fbram_size;

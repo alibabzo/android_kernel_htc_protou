@@ -1,4 +1,4 @@
-/* Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011, The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -229,7 +229,7 @@ static int __init dsp_init(void)
 	return misc_register(&dsp_misc);
 #else
 	return 0;
-#endif 
+#endif /* CONFIG_DEBUG_FS */
 }
 
 device_initcall(dsp_init);

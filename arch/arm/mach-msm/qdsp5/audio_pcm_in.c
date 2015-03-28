@@ -1009,4 +1009,3 @@ static int __init audpcm_in_init(void)
 	return misc_register(&audpcm_in_misc) || misc_register(&audpre_misc);
 }
 device_initcall(audpcm_in_init);
-

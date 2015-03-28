@@ -742,4 +742,3 @@ fail_alloc_region:
 fail_create_class:
 	kfree(adsp_devices);
 }
-

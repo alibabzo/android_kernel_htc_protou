@@ -359,4 +359,3 @@ extern void rmtask_init(void);
 #define QDSP_RAMC_OFFSET  0x400000
 
 #endif
-
