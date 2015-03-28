@@ -61,8 +61,16 @@ struct msm_camera_device_platform_data {
 	struct msm_camera_io_ext ioext;
 	struct msm_camera_io_clk ioclk;
 	uint8_t csid_core;
+	uint8_t is_csiphy;
+	uint8_t is_csic;
+	uint8_t is_csid;
+	uint8_t is_ispif;
 	uint8_t is_vpe;
 	struct msm_bus_scale_pdata *cam_bus_scale_table;
+#if 1	
+	int (*camera_csi_on) (void);
+	int (*camera_csi_off) (void);
+#endif	
 };
 enum msm_camera_csi_data_format {
 	CSI_8BIT,
@@ -75,6 +83,9 @@ struct msm_camera_csi_params {
 	uint8_t lane_assign;
 	uint8_t settle_cnt;
 	uint8_t dpcm_scheme;
+
+	uint8_t dt;
+
 };
 
 #ifdef CONFIG_SENSORS_MT9T013
@@ -140,7 +151,9 @@ struct msm_camera_sensor_flash_led {
 
 struct msm_camera_sensor_flash_src {
 	int flash_sr_type;
-
+	
+	int (*camera_flash)(int level);
+	
 	union {
 		struct msm_camera_sensor_flash_pmic pmic_src;
 		struct msm_camera_sensor_flash_pwm pwm_src;
@@ -157,6 +170,37 @@ struct msm_camera_sensor_flash_data {
 	struct msm_camera_sensor_flash_src *flash_src;
 };
 
+struct camera_led_info {
+	uint16_t enable;
+	uint16_t low_limit_led_state;
+	uint16_t max_led_current_ma;
+	uint16_t num_led_est_table;
+};
+
+struct camera_led_est {
+	uint16_t enable;
+	uint16_t led_state;
+	uint16_t current_ma;
+	uint16_t lumen_value;
+	uint16_t min_step;
+	uint16_t max_step;
+};
+
+struct camera_flash_info {
+	struct camera_led_info *led_info;
+	struct camera_led_est *led_est_table;
+};
+
+struct camera_flash_cfg {
+	int num_flash_levels;
+	int (*camera_flash)(int level);
+	uint16_t low_temp_limit;
+	uint16_t low_cap_limit;
+	uint16_t low_cap_limit_dual;
+	uint8_t postpone_led_mode;
+	struct camera_flash_info *flash_info;	
+};
+
 struct msm_camera_sensor_strobe_flash_data {
 	uint8_t flash_trigger;
 	uint8_t flash_charge; /* pin for charge */
@@ -166,6 +210,29 @@ struct msm_camera_sensor_strobe_flash_data {
 	spinlock_t spin_lock;
 	spinlock_t timer_lock;
 	int state;
+};
+
+struct msm_camera_rawchip_info {
+	int rawchip_reset;
+	int rawchip_intr0;
+	int rawchip_intr1;
+	uint8_t rawchip_spi_freq;
+	uint8_t rawchip_mclk_freq;
+	int (*camera_rawchip_power_on)(void);
+	int (*camera_rawchip_power_off)(void);
+	int (*rawchip_use_ext_1v2)(void);
+};
+
+enum rawchip_enable_type {
+	RAWCHIP_DISABLE,
+	RAWCHIP_ENABLE,
+	RAWCHIP_DXO_BYPASS,
+	RAWCHIP_MIPI_BYPASS,
+};
+
+enum hdr_mode_type {
+	NON_HDR_MODE,
+	HDR_MODE,
 };
 
 enum msm_camera_type {
@@ -184,6 +251,13 @@ enum camera_vreg_type {
 	REG_LDO,
 	REG_VS,
 	REG_GPIO,
+};
+
+enum sensor_flip_mirror_info {
+	CAMERA_SENSOR_NONE,
+	CAMERA_SENSOR_MIRROR,
+	CAMERA_SENSOR_FLIP,
+	CAMERA_SENSOR_MIRROR_FLIP,
 };
 
 struct camera_vreg_t {
@@ -219,6 +293,10 @@ struct msm_camera_gpio_conf {
 	uint8_t camera_off_table_size;
 	uint32_t *camera_on_table;
 	uint8_t camera_on_table_size;
+	
+	uint16_t *cam_gpio_tbl;
+	uint8_t cam_gpio_tbl_size;
+
 };
 
 enum msm_camera_i2c_mux_mode {
@@ -233,6 +311,13 @@ struct msm_camera_i2c_conf {
 	enum msm_camera_i2c_mux_mode i2c_mux_mode;
 };
 
+enum msm_camera_pixel_order_default {
+	MSM_CAMERA_PIXEL_ORDER_GR,
+	MSM_CAMERA_PIXEL_ORDER_RG,
+	MSM_CAMERA_PIXEL_ORDER_BG,
+	MSM_CAMERA_PIXEL_ORDER_GB,
+};
+
 struct msm_camera_sensor_platform_info {
 	int mount_angle;
 	int sensor_reset;
@@ -242,6 +327,16 @@ struct msm_camera_sensor_platform_info {
 	struct msm_camera_gpio_conf *gpio_conf;
 	struct msm_camera_i2c_conf *i2c_conf;
 	struct msm_camera_csi_lane_params *csi_lane_params;
+	
+	int sensor_reset_enable;
+	int sensor_pwd;
+	int vcm_pwd;
+	int vcm_enable;
+	int privacy_light;
+	enum msm_camera_pixel_order_default pixel_order_default;	
+	enum sensor_flip_mirror_info mirror_flip;
+	void *privacy_light_info;
+
 };
 
 enum msm_camera_actuator_name {
@@ -250,8 +345,7 @@ enum msm_camera_actuator_name {
 	MSM_ACTUATOR_MAIN_CAM_2,
 	MSM_ACTUATOR_MAIN_CAM_3,
 	MSM_ACTUATOR_MAIN_CAM_4,
-	MSM_ACTUATOR_MAIN_CAM_5,
-	MSM_ACTUATOR_MAIN_CAM_6,	
+	MSM_ACTUATOR_MAIN_CAM_5,	
 	MSM_ACTUATOR_WEB_CAM_0,
 	MSM_ACTUATOR_WEB_CAM_1,
 	MSM_ACTUATOR_WEB_CAM_2,
@@ -263,11 +357,20 @@ struct msm_actuator_info {
 	int bus_id;
 	int vcm_pwd;
 	int vcm_enable;
+	
+	int use_rawchip_af;
+
 };
 
 struct msm_eeprom_info {
 	struct i2c_board_info const *board_info;
 	int bus_id;
+};
+
+enum htc_camera_image_type_board {
+	HTC_CAMERA_IMAGE_NONE_BOARD,
+	HTC_CAMERA_IMAGE_YUSHANII_BOARD,
+	HTC_CAMERA_IMAGE_MAX_BOARD,
 };
 
 struct msm_camera_sensor_info {
@@ -290,9 +393,39 @@ struct msm_camera_sensor_info {
 	char *eeprom_data;
 	enum msm_camera_type camera_type;
 	enum msm_sensor_type sensor_type;
+
+    uint16_t num_actuator_info_table;
+	struct msm_actuator_info **actuator_info_table;
+
 	struct msm_actuator_info *actuator_info;
 	int pmic_gpio_enable;
-	struct msm_eeprom_info *eeprom_info;
+
+	
+	struct msm_camera_gpio_conf *gpio_conf;
+	int (*camera_power_on)(void);
+	int (*camera_power_off)(void);
+	enum htc_camera_image_type_board htc_image;	
+	int use_rawchip;
+	int hdr_mode;
+	int video_hdr_capability;
+#if 1 
+	
+	void(*camera_clk_switch)(void);
+	int power_down_disable; 
+	int full_size_preview; 
+	int cam_select_pin; 
+	int mirror_mode; 
+	int(*camera_pm8058_power)(int); 
+	struct camera_flash_cfg* flash_cfg;
+	int gpio_set_value_force; 
+	int dev_node;
+	int camera_platform;
+	uint8_t led_high_enabled;
+	uint32_t kpi_sensor_start;
+	uint32_t kpi_sensor_end;
+	uint8_t (*preview_skip_frame)(void);
+#endif
+
 };
 
 struct msm_camera_board_info {
@@ -326,10 +459,6 @@ struct msm_cad_endpoints {
 };
 
 #define MSM_MAX_DEC_CNT 14
-/* 7k target ADSP information */
-/* Bit 23:0, for codec identification like mp3, wav etc *
- * Bit 27:24, for mode identification like tunnel, non tunnel*
- * bit 31:28, for operation support like DM, DMA */
 enum msm_adspdec_concurrency {
 	MSM_ADSP_CODEC_WAV = 0,
 	MSM_ADSP_CODEC_ADPCM = 1,
@@ -620,7 +749,25 @@ int msm_add_host(unsigned int host,
 #if defined(CONFIG_USB_FUNCTION_MSM_HSUSB) \
 	|| defined(CONFIG_USB_MSM_72K) || defined(CONFIG_USB_MSM_72K_MODULE)
 void msm_hsusb_set_vbus_state(int online);
+void msm_otg_set_vbus_state(int online);
+enum usb_connect_type {
+	CONNECT_TYPE_CLEAR = -2,
+	CONNECT_TYPE_UNKNOWN = -1,
+	CONNECT_TYPE_NONE = 0,
+	CONNECT_TYPE_USB,
+	CONNECT_TYPE_AC,
+	CONNECT_TYPE_9V_AC,
+	CONNECT_TYPE_WIRELESS,
+	CONNECT_TYPE_INTERNAL,
+	CONNECT_TYPE_UNSUPPORTED,
+#ifdef CONFIG_MACH_VERDI_LTE
+	
+	CONNECT_TYPE_USB_9V_AC,
+#endif
+	CONNECT_TYPE_MAX,
+};
 #else
+static inline void msm_otg_set_vbus_state(int online) {}
 static inline void msm_hsusb_set_vbus_state(int online) {}
 #endif
 
@@ -655,6 +802,9 @@ struct t_owe_charging_notifier{
 int owe_charging_register_notifier(struct t_owe_charging_notifier *);
 static LIST_HEAD(g_lh_owe_charging_notifier_list);
 
+#define SHIP_BUILD	0
+#define MFG_BUILD	1
+
 /***********************************
  Direction: sii9234 drvier -> cable detect driver
 ***********************************/
@@ -678,6 +828,7 @@ struct t_usb_host_status_notifier{
 int usb_host_detect_register_notifier(struct t_usb_host_status_notifier *);
 static LIST_HEAD(g_lh_usb_host_detect_notifier_list);
 #endif
+#define ENG_BUILD	2
 /* END: add USB connected notify function */
 
 void msm_snddev_init(void);
@@ -691,5 +842,7 @@ void msm_snddev_tx_route_deconfig(void);
 
 extern unsigned int msm_shared_ram_phys; /* defined in arch/arm/mach-msm/io.c */
 
+extern int dying_processors_read_proc(char *page, char **start, off_t off,
+	int count, int *eof, void *data);
 
 #endif
