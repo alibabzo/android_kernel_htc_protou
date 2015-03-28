@@ -147,12 +147,9 @@ static int mipi_dsi_on(struct platform_device *pdev)
 	pinfo = &mfd->panel_info;
 	esc_byte_ratio = pinfo->mipi.esc_byte_ratio;
 
-
-	if (mfd->first_init_lcd == 0) {
-		if (mipi_dsi_pdata && mipi_dsi_pdata->dsi_power_save)
-			mipi_dsi_pdata->dsi_power_save(1);
-	}
-
+	if (mipi_dsi_pdata && mipi_dsi_pdata->dsi_power_save)
+		mipi_dsi_pdata->dsi_power_save(1);
+	
 	cont_splash_clk_ctrl(0);
 	mipi_dsi_prepare_clocks();
 
@@ -199,9 +196,8 @@ static int mipi_dsi_on(struct platform_device *pdev)
 					vfp - 1) << 16 | (hspw + hbp +
 					width + dummy_xres + hfp - 1));
 		} else {
-			
-			MIPI_OUTP(MIPI_DSI_BASE + 0x00ac,
-						mipi_dsi_pdata->dlane_swap);
+			/* DSI_LAN_SWAP_CTRL */
+			MIPI_OUTP(MIPI_DSI_BASE + 0x00ac, mipi->dlane_swap);
 
 			MIPI_OUTP(MIPI_DSI_BASE + 0x20,
 				((hbp + width + dummy_xres) << 16 | (hbp)));
@@ -216,7 +212,7 @@ static int mipi_dsi_on(struct platform_device *pdev)
 		MIPI_OUTP(MIPI_DSI_BASE + 0x30, 0);
 		MIPI_OUTP(MIPI_DSI_BASE + 0x34, (vspw << 16));
 
-	} else {		
+	} else {		/* command mode */
 		if (mipi->dst_format == DSI_CMD_DST_FORMAT_RGB888)
 			bpp = 3;
 		else if (mipi->dst_format == DSI_CMD_DST_FORMAT_RGB666)
@@ -224,22 +220,22 @@ static int mipi_dsi_on(struct platform_device *pdev)
 		else if (mipi->dst_format == DSI_CMD_DST_FORMAT_RGB565)
 			bpp = 2;
 		else
-			bpp = 3;	
+			bpp = 3;	/* Default format set to RGB888 */
 
 		ystride = width * bpp + 1;
 
-		
+		/* DSI_COMMAND_MODE_MDP_STREAM_CTRL */
 		data = (ystride << 16) | (mipi->vc << 8) | DTYPE_DCS_LWRITE;
 		MIPI_OUTP(MIPI_DSI_BASE + 0x5c, data);
 		MIPI_OUTP(MIPI_DSI_BASE + 0x54, data);
 
-		
+		/* DSI_COMMAND_MODE_MDP_STREAM_TOTAL */
 		data = height << 16 | width;
 		MIPI_OUTP(MIPI_DSI_BASE + 0x60, data);
 		MIPI_OUTP(MIPI_DSI_BASE + 0x58, data);
 	}
 
-	mipi_dsi_host_init(mipi, mipi_dsi_pdata->dlane_swap);
+	mipi_dsi_host_init(mipi);
 
 	if (mipi->force_clk_lane_hs) {
 		u32 tmp;
@@ -250,31 +246,10 @@ static int mipi_dsi_on(struct platform_device *pdev)
 		wmb();
 	}
 
-#if defined(CONFIG_MACH_DUMMY)
-	if ((panel_type == PANEL_ID_PROTODCG_SHARP || panel_type == PANEL_ID_PROTODCG_SHARP_C1) &&
-		mfd->first_init_lcd != 0) {
-		protodcg_orise_lcd_pre_off(pdev);
-		if (mipi_dsi_pdata && mipi_dsi_pdata->dsi_power_save)
-			mipi_dsi_pdata->dsi_power_save(1);
-	}
-#elif defined(CONFIG_MACH_PROTOU)
-	if ((panel_type == PANEL_ID_PROTOU_SHARP || panel_type == PANEL_ID_PROTOU_SHARP_C1) &&
-		mfd->first_init_lcd != 0) {
-		
-		protou_orise_lcd_pre_off(pdev);
-		if (mipi_dsi_pdata && mipi_dsi_pdata->dsi_power_save)
-			mipi_dsi_pdata->dsi_power_save(1);
-	}
-#endif
-	if (panel_type == PANEL_ID_URANUS_SONY_ORISE) {
-		if(mfd->first_init_lcd != 0) {
-			if (mipi_dsi_pdata && mipi_dsi_pdata->lcd_pre_off)
-				mipi_dsi_pdata->lcd_pre_off(pdev);
-			if (mipi_dsi_pdata && mipi_dsi_pdata->dsi_power_save)
-				mipi_dsi_pdata->dsi_power_save(1);
-		}
-
-	}
+	if (mdp_rev >= MDP_REV_41)
+		mutex_lock(&mfd->dma->ov_mutex);
+	else
+		down(&mfd->dma->mutex);
 
 	if (mfd->op_enable)
 		ret = panel_next_on(pdev);
@@ -329,14 +304,16 @@ static int mipi_dsi_on(struct platform_device *pdev)
 	}
 
 	mdp4_overlay_dsi_state_set(ST_DSI_RESUME);
-	
-	mipi_dsi_clk_cfg(1);
-	mipi_dsi_cmd_mdp_busy();
+
+	if (mdp_rev >= MDP_REV_41)
+		mutex_unlock(&mfd->dma->ov_mutex);
+	else
+		up(&mfd->dma->mutex);
+
 	pr_debug("%s-:\n", __func__);
 
 	return ret;
 }
-
 
 static int mipi_dsi_resource_initialized;
 
